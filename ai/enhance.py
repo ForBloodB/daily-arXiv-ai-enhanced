@@ -2,6 +2,7 @@ import os
 import json
 import sys
 import re
+import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import List, Dict
 from queue import Queue
@@ -27,6 +28,19 @@ if os.path.exists('.env'):
 template = open("template.txt", "r").read()
 system = open("system.txt", "r").read()
 
+SENSITIVE_CHECK_URL = "https://spam.dw-dengwei.workers.dev"
+SENSITIVE_CHECK_MAX_RETRIES = 3
+SENSITIVE_CHECK_TIMEOUT_SECONDS = 5
+SENSITIVE_CHECK_RETRY_DELAY_SECONDS = 1
+
+DEFAULT_AI_FIELDS = {
+    "tldr": "Summary generation failed",
+    "motivation": "Motivation analysis unavailable",
+    "method": "Method extraction failed",
+    "result": "Result analysis unavailable",
+    "conclusion": "Conclusion extraction failed"
+}
+
 def parse_args():
     """解析命令行参数"""
     parser = argparse.ArgumentParser()
@@ -34,30 +48,55 @@ def parse_args():
     parser.add_argument("--max_workers", type=int, default=1, help="Maximum number of parallel workers")
     return parser.parse_args()
 
-def process_single_item(chain, item: Dict, language: str) -> Dict:
-    def is_sensitive(content: str) -> bool:
-        """
-        调用 spam.dw-dengwei.workers.dev 接口检测内容是否包含敏感词。
-        返回 True 表示触发敏感词，False 表示未触发。
-        """
+def is_sensitive(content: str) -> bool:
+    """
+    调用 spam.dw-dengwei.workers.dev 接口检测内容是否包含敏感词。
+    只有接口正常返回 sensitive=true 时才过滤内容；接口不可用时跳过检查继续处理。
+    """
+    last_error = None
+    for attempt in range(1, SENSITIVE_CHECK_MAX_RETRIES + 1):
         try:
             resp = requests.post(
-                "https://spam.dw-dengwei.workers.dev",
+                SENSITIVE_CHECK_URL,
                 json={"text": content},
-                timeout=5
+                timeout=SENSITIVE_CHECK_TIMEOUT_SECONDS
             )
             if resp.status_code == 200:
-                result = resp.json()
-                # 约定接口返回 {"sensitive": true/false, ...}
-                return result.get("sensitive", True)
+                try:
+                    result = resp.json()
+                except ValueError as e:
+                    last_error = f"invalid JSON response: {e}"
+                    print(
+                        f"Sensitive check failed on attempt {attempt}/{SENSITIVE_CHECK_MAX_RETRIES}: {last_error}",
+                        file=sys.stderr
+                    )
+                else:
+                    # 约定接口返回 {"sensitive": true/false, ...}
+                    return result.get("sensitive") is True
             else:
-                # 如果接口异常，默认不触发敏感词
-                print(f"Sensitive check failed with status {resp.status_code}", file=sys.stderr)
-                return True
+                last_error = f"status {resp.status_code}"
+                print(
+                    f"Sensitive check failed on attempt {attempt}/{SENSITIVE_CHECK_MAX_RETRIES} with status {resp.status_code}",
+                    file=sys.stderr
+                )
         except Exception as e:
-            print(f"Sensitive check error: {e}", file=sys.stderr)
-            return True
+            last_error = str(e)
+            print(
+                f"Sensitive check error on attempt {attempt}/{SENSITIVE_CHECK_MAX_RETRIES}: {e}",
+                file=sys.stderr
+            )
 
+        if attempt < SENSITIVE_CHECK_MAX_RETRIES:
+            time.sleep(SENSITIVE_CHECK_RETRY_DELAY_SECONDS)
+
+    print(
+        f"WARNING: Sensitive check unavailable after {SENSITIVE_CHECK_MAX_RETRIES} attempts; "
+        f"treating content as not sensitive. Last error: {last_error}",
+        file=sys.stderr
+    )
+    return False
+
+def process_single_item(chain, item: Dict, language: str) -> Dict:
     def check_github_code(content: str) -> Dict:
         """提取并验证 GitHub 链接"""
         code_info = {}
@@ -115,15 +154,6 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
         item.update(code_info)
 
     """处理单个数据项"""
-    # Default structure with meaningful fallback values
-    default_ai_fields = {
-        "tldr": "Summary generation failed",
-        "motivation": "Motivation analysis unavailable",
-        "method": "Method extraction failed",
-        "result": "Result analysis unavailable",
-        "conclusion": "Conclusion extraction failed"
-    }
-    
     try:
         response: Structure = chain.invoke({
             "language": language,
@@ -147,17 +177,17 @@ def process_single_item(chain, item: Dict, language: str) -> Dict:
                 print(f"Failed to parse JSON for {item.get('id', 'unknown')}: {json_e}", file=sys.stderr)
         
         # Merge partial data with defaults to ensure all fields exist
-        item['AI'] = {**default_ai_fields, **partial_data}
+        item['AI'] = {**DEFAULT_AI_FIELDS, **partial_data}
         print(f"Using partial AI data for {item.get('id', 'unknown')}: {list(partial_data.keys())}", file=sys.stderr)
     except Exception as e:
         # Catch any other exceptions and provide default values
         print(f"Unexpected error for {item.get('id', 'unknown')}: {e}", file=sys.stderr)
-        item['AI'] = default_ai_fields
+        item['AI'] = DEFAULT_AI_FIELDS.copy()
     
     # Final validation to ensure all required fields exist
-    for field in default_ai_fields.keys():
+    for field in DEFAULT_AI_FIELDS.keys():
         if field not in item['AI']:
-            item['AI'][field] = default_ai_fields[field]
+            item['AI'][field] = DEFAULT_AI_FIELDS[field]
 
     # 检查 AI 生成的所有字段
     for v in item.get("AI", {}).values():
@@ -247,10 +277,20 @@ def main():
     )
     
     # 保存结果
+    written_count = 0
     with open(target_file, "w") as f:
         for item in processed_data:
             if item is not None:
                 f.write(json.dumps(item) + "\n")
+                written_count += 1
+
+    print(f"AI enhanced output count: {written_count}/{len(data)}", file=sys.stderr)
+    if data and written_count == 0:
+        print(
+            f"ERROR: AI enhancement produced an empty output file from {len(data)} input papers: {target_file}",
+            file=sys.stderr
+        )
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()

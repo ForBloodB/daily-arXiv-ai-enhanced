@@ -27,6 +27,7 @@ jobs:
         source .venv/bin/activate
         today=$(date -u "+%Y-%m-%d")
         echo "开始爬取 $today 的arXiv论文... / Starting to crawl $today arXiv papers..."
+        mkdir -p data
         
         # 检查今日文件是否已存在，如存在则删除 / Check if today's file exists, delete if found
         if [ -f "data/${today}.jsonl" ]; then
@@ -49,10 +50,11 @@ jobs:
         # Use Scrapy to crawl
         scrapy crawl arxiv -o ../data/${today}.jsonl
         
-        # 检查爬取是否成功 / Check if crawling was successful
+        # 如果当天确实没有论文，Scrapy 可能不会生成 feed 文件，创建空文件交给去重步骤判断
+        # If there are no papers today, Scrapy may not create a feed file; create an empty file for the dedup step
         if [ ! -f "../data/${today}.jsonl" ]; then
-            echo "爬取失败，未生成数据文件 / Crawling failed, no data file generated"
-            exit 1
+            echo "今日未生成论文数据文件，创建空文件用于后续 no-data 判断 / No paper data file generated today, creating an empty file for no-data handling"
+            touch "../data/${today}.jsonl"
         fi
         
         echo "crawl_date=$today" >> $GITHUB_OUTPUT
@@ -111,10 +113,15 @@ jobs:
         export MODEL_NAME="${{ vars.MODEL_NAME }}"
         
         python enhance.py --data ../data/${today}.jsonl
+        AI_FILE="../data/${today}_AI_enhanced_${LANGUAGE}.jsonl"
         
         # 检查AI处理是否成功 / Check if AI processing was successful
         if [ $? -ne 0 ]; then
             echo "AI处理失败 / AI processing failed"
+            exit 1
+        fi
+        if [ ! -s "$AI_FILE" ]; then
+            echo "AI增强文件为空或不存在 / AI enhanced file is empty or missing: $AI_FILE"
             exit 1
         fi
         echo "AI增强处理完成 / AI enhancement processing completed"
@@ -134,11 +141,11 @@ jobs:
         # 使用AI增强文件进行转换 / Use AI enhanced file for conversion
         AI_FILE="../data/${today}_AI_enhanced_${LANGUAGE}.jsonl"
         
-        if [ -f "$AI_FILE" ]; then
+        if [ -s "$AI_FILE" ]; then
             echo "使用AI增强文件进行转换... / Using AI enhanced file for conversion..."
             python convert.py --data "$AI_FILE"
         else
-            echo "错误：未找到AI增强文件 / Error: AI enhanced file not found"
+            echo "错误：AI增强文件不存在或为空 / Error: AI enhanced file is missing or empty"
             echo "AI文件: $AI_FILE"
             exit 1
         fi
