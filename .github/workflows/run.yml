@@ -111,6 +111,8 @@ jobs:
         export OPENAI_BASE_URL=${{ secrets.OPENAI_BASE_URL }}
         export LANGUAGE="${{ vars.LANGUAGE }}"
         export MODEL_NAME="${{ vars.MODEL_NAME }}"
+        export ENABLE_SENSITIVE_CHECK="${{ vars.ENABLE_SENSITIVE_CHECK }}"
+        export SENSITIVE_CHECK_URL="${{ vars.SENSITIVE_CHECK_URL }}"
         
         python enhance.py --data ../data/${today}.jsonl
         AI_FILE="../data/${today}_AI_enhanced_${LANGUAGE}.jsonl"

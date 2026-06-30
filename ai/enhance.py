@@ -27,7 +27,14 @@ if os.path.exists('.env'):
 template = open("template.txt", "r").read()
 system = open("system.txt", "r").read()
 
-SENSITIVE_CHECK_URL = "https://spam.dw-dengwei.workers.dev"
+def get_env_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None or value.strip() == "":
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+SENSITIVE_CHECK_ENABLED = get_env_flag("ENABLE_SENSITIVE_CHECK", default=False)
+SENSITIVE_CHECK_URL = os.environ.get("SENSITIVE_CHECK_URL", "https://spam.dw-dengwei.workers.dev")
 SENSITIVE_CHECK_MAX_RETRIES = 3
 SENSITIVE_CHECK_TIMEOUT_SECONDS = 5
 SENSITIVE_CHECK_RETRY_DELAY_SECONDS = 1
@@ -58,8 +65,12 @@ def parse_args():
 def is_sensitive(content: str) -> bool:
     """
     调用 spam.dw-dengwei.workers.dev 接口检测内容是否包含敏感词。
-    只有接口正常返回 sensitive=true 时才过滤内容；接口不可用时跳过检查继续处理。
+    默认关闭；只有 ENABLE_SENSITIVE_CHECK=true 时才启用。
+    启用后，只有接口正常返回 sensitive=true 时才过滤内容；接口不可用时跳过检查继续处理。
     """
+    if not SENSITIVE_CHECK_ENABLED:
+        return False
+
     last_error = None
     for attempt in range(1, SENSITIVE_CHECK_MAX_RETRIES + 1):
         try:
