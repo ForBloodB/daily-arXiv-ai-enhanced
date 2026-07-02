@@ -18,6 +18,8 @@ let currentFilteredPapers = []; // 当前过滤后的论文列表
 let textSearchQuery = ''; // 实时文本搜索查询
 let previousActiveKeywords = null; // 文本搜索激活时，暂存之前的关键词激活集合
 let previousActiveAuthors = null; // 文本搜索激活时，暂存之前的作者激活集合
+const DEFAULT_CONFIGURED_CATEGORIES = ['cs.AR', 'cs.ET', 'cs.OS', 'cs.FL', 'cs.DM', 'cs.MA'];
+let configuredCategories = [...DEFAULT_CONFIGURED_CATEGORIES]; // 从 data 分支加载的目标分类配置
 
 // 加载用户的关键词设置
 function loadUserKeywords() {
@@ -275,12 +277,7 @@ function outputJsonData(papers, category) {
 function getPapersByCategory(paperData, category) {
   let papers = [];
   if (category === 'all') {
-    const { sortedCategories } = getAllCategories(paperData);
-    sortedCategories.forEach(cat => {
-      if (paperData[cat]) {
-        papers = papers.concat(paperData[cat]);
-      }
-    });
+    papers = getUniquePapersFromData(paperData);
   } else if (paperData[category]) {
     papers = paperData[category];
   }
@@ -384,7 +381,10 @@ document.addEventListener('DOMContentLoaded', () => {
   urlAuthorParam = getUrlAuthor();
   urlKeywordsParam = getUrlKeywords();
 
-  fetchAvailableDates().then(() => {
+  Promise.all([
+    fetchCategoryConfig(),
+    fetchAvailableDates()
+  ]).then(() => {
     if (availableDates.length > 0) {
       loadPapersByDate(availableDates[0]);
     }
@@ -738,6 +738,32 @@ async function fetchAvailableDates() {
   }
 }
 
+async function fetchCategoryConfig() {
+  try {
+    let response = await fetch(DATA_CONFIG.getDataUrl('assets/category-config.json'));
+    if (!response.ok) {
+      response = await fetch('assets/category-config.json');
+    }
+
+    if (!response.ok) {
+      console.warn('Category config not found:', response.status);
+      configuredCategories = [...DEFAULT_CONFIGURED_CATEGORIES];
+      return configuredCategories;
+    }
+
+    const config = await response.json();
+    const categories = Array.isArray(config.categories) ? config.categories : [];
+    configuredCategories = categories
+      .map(category => String(category).trim())
+      .filter(Boolean);
+    return configuredCategories;
+  } catch (error) {
+    console.error('获取分类配置失败:', error);
+    configuredCategories = [...DEFAULT_CONFIGURED_CATEGORIES];
+    return configuredCategories;
+  }
+}
+
 function initDatePicker() {
   const datepickerInput = document.getElementById('datepicker');
   
@@ -897,7 +923,7 @@ async function loadPapersByDate(date) {
 function parseJsonlData(jsonlText, date) {
   const result = {};
   
-  const lines = jsonlText.trim().split('\n');
+  const lines = jsonlText.trim().split('\n').filter(Boolean);
   
   lines.forEach(line => {
     try {
@@ -909,19 +935,21 @@ function parseJsonlData(jsonlText, date) {
       
       let allCategories = Array.isArray(paper.categories) ? paper.categories : [paper.categories];
       
-      const primaryCategory = allCategories[0];
+      const targetCategories = configuredCategories.length > 0
+        ? configuredCategories.filter(category => allCategories.includes(category))
+        : [allCategories[0]];
       
-      if (!result[primaryCategory]) {
-        result[primaryCategory] = [];
+      if (targetCategories.length === 0) {
+        return;
       }
       
       const summary = paper.AI && paper.AI.tldr ? paper.AI.tldr : paper.summary;
-      
-      result[primaryCategory].push({
+      const parsedPaper = {
         title: paper.title,
         url: paper.abs || paper.pdf || `https://arxiv.org/abs/${paper.id}`,
         authors: Array.isArray(paper.authors) ? paper.authors.join(', ') : paper.authors,
         category: allCategories,
+        allCategories: allCategories,
         summary: summary,
         details: paper.summary || '',
         date: date,
@@ -933,6 +961,13 @@ function parseJsonlData(jsonlText, date) {
         code_url: paper.code_url || '',
         code_stars: paper.code_stars || 0,
         code_last_update: paper.code_last_update || ''
+      };
+
+      targetCategories.forEach(category => {
+        if (!result[category]) {
+          result[category] = [];
+        }
+        result[category].push(parsedPaper);
       });
     } catch (error) {
       console.error('解析JSON行失败:', error, line);
@@ -944,7 +979,10 @@ function parseJsonlData(jsonlText, date) {
 
 // 获取所有类别并按偏好排序
 function getAllCategories(data) {
-  const categories = Object.keys(data);
+  const dataCategories = Object.keys(data);
+  const categories = configuredCategories.length > 0
+    ? [...configuredCategories, ...dataCategories.filter(category => !configuredCategories.includes(category))]
+    : dataCategories;
   const catePaperCount = {};
   
   categories.forEach(category => {
@@ -953,27 +991,50 @@ function getAllCategories(data) {
   
   return {
     sortedCategories: categories.sort((a, b) => {
+      const preferredA = configuredCategories.indexOf(a);
+      const preferredB = configuredCategories.indexOf(b);
+      if (preferredA !== -1 && preferredB !== -1) return preferredA - preferredB;
+      if (preferredA !== -1) return -1;
+      if (preferredB !== -1) return 1;
       return a.localeCompare(b);
     }),
     categoryCounts: catePaperCount
   };
 }
 
+function getUniquePapersFromData(data) {
+  const uniquePapers = [];
+  const seen = new Set();
+
+  Object.keys(data).forEach(category => {
+    data[category].forEach(paper => {
+      const key = paper.id || paper.url || `${paper.title}-${paper.date}`;
+      if (!seen.has(key)) {
+        seen.add(key);
+        uniquePapers.push(paper);
+      }
+    });
+  });
+
+  return uniquePapers;
+}
+
 function renderCategoryFilter(categories) {
   const container = document.querySelector('.category-scroll');
   const { sortedCategories, categoryCounts } = categories;
+  const displayCategories = configuredCategories.length > 0
+    ? [...configuredCategories, ...sortedCategories.filter(category => !configuredCategories.includes(category))]
+    : sortedCategories;
   
   let totalPapers = 0;
-  Object.values(categoryCounts).forEach(count => {
-    totalPapers += count;
-  });
+  totalPapers = getUniquePapersFromData(paperData).length;
   
   container.innerHTML = `
     <button class="category-button ${currentCategory === 'all' ? 'active' : ''}" data-category="all">All<span class="category-count">${totalPapers}</span></button>
   `;
   
-  sortedCategories.forEach(category => {
-    const count = categoryCounts[category];
+  displayCategories.forEach(category => {
+    const count = categoryCounts[category] || 0;
     const button = document.createElement('button');
     button.className = `category-button ${category === currentCategory ? 'active' : ''}`;
     button.innerHTML = `${category}<span class="category-count">${count}</span>`;
@@ -1101,12 +1162,7 @@ function renderPapers() {
   
   let papers = [];
   if (currentCategory === 'all') {
-    const { sortedCategories } = getAllCategories(paperData);
-    sortedCategories.forEach(category => {
-      if (paperData[category]) {
-        papers = papers.concat(paperData[category]);
-      }
-    });
+    papers = getUniquePapersFromData(paperData);
   } else if (paperData[currentCategory]) {
     papers = paperData[currentCategory];
   }
